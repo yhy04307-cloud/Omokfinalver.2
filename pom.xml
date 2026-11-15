@@ -8,7 +8,7 @@
   <artifactId>omok3d</artifactId>
   <version>1.0.0</version>
   <name>3D Omok</name>
-  <description>19x19x19 3차원 오목 (투영 기반 승리 판정)</description>
+  <description>19x19x19 3차원 중력 오목 (파이 룰 적용)</description>
 
   <properties>
     <maven.compiler.release>17</maven.compiler.release>

@@ -62,7 +62,7 @@ import javafx.stage.Screen;
 import javafx.stage.Stage;
 import javafx.util.Duration;
 
-/** 3D Omok: stones are dropped onto a thin wooden board and stack upward. Single free-camera 3D view. */
+/** 3D Omok with Pie Rule (Swap Rule): stones are dropped onto a thin wooden board and stack upward. */
 public class App extends Application {
     // ===== Board geometry =====
     static final int N = Board.N;
@@ -99,23 +99,36 @@ public class App extends Application {
         static final String TIP_REDO = "다시 실행";
         static final String TIP_STATS = "통계";
         static final String TIP_RESTART = "새 대국";
-        static final String TIP_PICK_FIRST = "선공 선택 (첫 수 전에만)";
+        static final String TIP_PIE_RULE = "파이 룰 적용: 첫 수(흑) 후 후공이 진영 교환 선택";
         static final String HINT = "드래그: 회전   ·   클릭: 착수 (아래층부터 쌓임)   ·   휠: 확대/축소";
         static final String VIEW_FRONT = "앞", VIEW_BACK = "뒤", VIEW_LEFT = "왼쪽",
             VIEW_RIGHT = "오른쪽", VIEW_TOP = "위", VIEW_BOTTOM = "아래", VIEW_DEFAULT = "기본";
         static final String FULL = "가득 참";
+        static final String PIE_PROMPT = "파이 룰 (후공 선택): 첫 수의 흑돌을 가져올까요?";
+        static final String PIE_SWAP = "교환 (흑 선택)";
+        static final String PIE_KEEP = "유지 (백 진행)";
+        static final String PIE_WAITING = "파이 룰 선택 대기 중";
+        static final String PIE_SWAPPED_TAG = "진영 교환됨 (2P: 흑 / 1P: 백)";
+        static final String PIE_KEPT_TAG = "진영 유지됨 (1P: 흑 / 2P: 백)";
 
         static String hover(int x, int z, int floor) {
             return String.format(Locale.ROOT, "%d, %d  ·  %d층", x + 1, z + 1, floor + 1);
         }
 
-        static String winner(int player, int count) {
-            return (player == 1 ? "흑" : "백") + " 승리!  " + count + "목";
+        static String winner(int player, int count, boolean pieSwapped) {
+            String stoneName = (player == 1 ? "흑" : "백");
+            String owner = "";
+            if (player == 1) {
+                owner = pieSwapped ? " (2P)" : " (1P)";
+            } else {
+                owner = pieSwapped ? " (1P)" : " (2P)";
+            }
+            return stoneName + owner + " 승리!  " + count + "목";
         }
     }
 
-    /** One placed stone (kept for undo/redo). */
-    record Move(int x, int y, int z, int player) {}
+    /** One placed stone (kept for undo/redo, including Pie Rule swap state at the time of move). */
+    record Move(int x, int y, int z, int player, boolean pieSwappedAtMove) {}
 
     // ===== Game state =====
     final Board board = new Board();
@@ -152,6 +165,7 @@ public class App extends Application {
     final Label movesLabel = new Label("0");
     final Label timeLabel = new Label("00:00");
     final List<StackPane> toggleSlots = new ArrayList<>();
+    HBox pieBanner;
     Button undoButton, redoButton;
     final Timeline clock = new Timeline(new KeyFrame(Duration.seconds(1), e -> {
         seconds++;
@@ -201,7 +215,7 @@ public class App extends Application {
         scene.getStylesheets().add(css);
         stage.setMinWidth(Math.min(720, vb.getWidth()));
         stage.setMinHeight(Math.min(560, vb.getHeight()));
-        stage.setTitle("3D Omok");
+        stage.setTitle("3D Omok (Pie Rule)");
         stage.setScene(scene);
         stage.show();
         fitCamera();
@@ -277,7 +291,7 @@ public class App extends Application {
             setHover(-1, -1);
         });
         sub.setOnMouseReleased(e -> {
-            if (over || e.getButton() != MouseButton.PRIMARY) return;
+            if (over || board.isPieChoicePending() || e.getButton() != MouseButton.PRIMARY) return;
             if (Math.hypot(e.getSceneX() - pressX, e.getSceneY() - pressY) > 5) return;   // it was a drag
             int[] c = pickColumn(e);
             if (c != null) place(c[0], c[1]);
@@ -535,7 +549,7 @@ public class App extends Application {
 
     // ===================== Overlay UI =====================
 
-    /** Top bar: settings, first-player toggle, undo/redo, stats, restart; second row: turn, move count, clock. */
+    /** Top bar: settings, turn indicator toggle, undo/redo, stats, restart; second row: turn, move count, clock; Pie Rule banner. */
     Node buildOverlay() {
         Button settings = iconButton(Icons.SETTINGS, Strings.TIP_SETTINGS);
         settings.setOnAction(e -> showCard(settings, buildViewPresets()));
@@ -558,8 +572,8 @@ public class App extends Application {
         // Turn indicator
         infoLabel.getStyleClass().add("pill-text");
         HBox turnPill = pill("", turnDot, Icons.create(Icons.PLAY, 18), infoLabel);
-        turnPill.setPrefWidth(340);
-        turnPill.setMinWidth(340);
+        turnPill.setPrefWidth(360);
+        turnPill.setMinWidth(360);
 
         movesLabel.getStyleClass().add("pill-number");
         HBox movesPill = pill("", Icons.create(Icons.HASH, 34), movesLabel);
@@ -576,7 +590,10 @@ public class App extends Application {
         row2.setPadding(new Insets(0, 0, 0, 290));
         row2.setPickOnBounds(false);
 
-        VBox overlay = new VBox(16, row1, row2);
+        // Pie Rule decision banner (shown immediately after move 1)
+        pieBanner = buildPieBanner();
+
+        VBox overlay = new VBox(16, row1, row2, pieBanner);
         overlay.setPadding(new Insets(26, 40, 0, 40));
         overlay.setAlignment(Pos.TOP_LEFT);
         overlay.setPickOnBounds(false);   // clicks outside the pills pass through to the 3D view
@@ -604,6 +621,38 @@ public class App extends Application {
         return host;
     }
 
+    /** Interactive banner allowing Player 2 to swap colors (take Black) or keep White after the first stone. */
+    HBox buildPieBanner() {
+        Label prompt = new Label(Strings.PIE_PROMPT);
+        prompt.getStyleClass().add("pill-text");
+
+        Button swapBtn = new Button(Strings.PIE_SWAP);
+        swapBtn.getStyleClass().addAll("chip", "chip-accent");
+        swapBtn.setFocusTraversable(false);
+        swapBtn.setOnAction(e -> handlePieChoice(true));
+
+        Button keepBtn = new Button(Strings.PIE_KEEP);
+        keepBtn.getStyleClass().add("chip");
+        keepBtn.setFocusTraversable(false);
+        keepBtn.setOnAction(e -> handlePieChoice(false));
+
+        HBox banner = pill("pill-pink", prompt, swapBtn, keepBtn);
+        banner.setAlignment(Pos.CENTER);
+        banner.setMaxWidth(Region.USE_PREF_SIZE);
+        banner.setVisible(false);
+        banner.setManaged(false);
+        return banner;
+    }
+
+    /** Applies Player 2's Pie Rule decision and updates the UI. */
+    void handlePieChoice(boolean swap) {
+        if (!board.isPieChoicePending()) return;
+        board.decidePie(swap);
+        turn = board.getCurrentTurn(); // Always 2 (White's turn next)
+        refreshUi();
+        updateGhost();
+    }
+
     /** Rounded lavender pill containing the given nodes. */
     HBox pill(String extraStyleClass, Node... nodes) {
         HBox box = new HBox(16, nodes);
@@ -622,22 +671,15 @@ public class App extends Application {
         return b;
     }
 
-    /** Black/white toggle: shows whose turn it is; before the first move it also picks who starts. */
+    /** Black/white stone indicator toggle (under Pie Rule, Black always places the first stone). */
     HBox buildToggle() {
         HBox box = new HBox(4);
         box.getStyleClass().addAll("pill", "toggle-pill");
         box.setAlignment(Pos.CENTER);
         for (int player = 1; player <= 2; player++) {
-            final int who = player;
-            StackPane slot = new StackPane(stoneDot(who, 15));
+            StackPane slot = new StackPane(stoneDot(player, 15));
             slot.getStyleClass().add("toggle-option");
-            slot.setOnMouseClicked(e -> {
-                if (history.isEmpty()) {
-                    turn = who;
-                    refreshUi();
-                }
-            });
-            Tooltip.install(slot, new Tooltip(Strings.TIP_PICK_FIRST));
+            Tooltip.install(slot, new Tooltip(Strings.TIP_PIE_RULE));
             toggleSlots.add(slot);
             box.getChildren().add(slot);
         }
@@ -678,7 +720,7 @@ public class App extends Application {
         return row;
     }
 
-    /** Simple statistics shown in the stats popup. */
+    /** Simple statistics shown in the stats popup (includes Pie Rule status). */
     Node buildStats() {
         int black = 0, white = 0, tallest = 0;
         for (int x = 0; x < N; x++)
@@ -692,10 +734,19 @@ public class App extends Application {
                 }
                 tallest = Math.max(tallest, h);
             }
+        String pieStatus = history.isEmpty()
+            ? "파이 룰 대기 (1수 후 선택)"
+            : (board.isPieChoicePending()
+                ? Strings.PIE_WAITING
+                : (board.isPieSwapped() ? Strings.PIE_SWAPPED_TAG : Strings.PIE_KEPT_TAG));
+        Label pieLabel = new Label(pieStatus);
+        pieLabel.getStyleClass().add("pill-text");
+
         VBox box = new VBox(8,
             statRow(stoneDot(1, 10), String.valueOf(black)),
             statRow(stoneDot(2, 10), String.valueOf(white)),
-            statRow(Icons.create(Icons.STATS, 20), tallest + "F"));
+            statRow(Icons.create(Icons.STATS, 20), tallest + "F"),
+            pieLabel);
         return box;
     }
 
@@ -761,9 +812,9 @@ public class App extends Application {
             new KeyValue(ry.angleProperty(), target, Interpolator.EASE_BOTH))).play();
     }
 
-    /** Player move: drops the current player's stone into column (x, z). */
+    /** Player move: drops the current player's stone into column (x, z) unless Pie Rule choice is pending. */
     void place(int x, int z) {
-        if (over) return;
+        if (over || board.isPieChoicePending()) return;
         redoStack.clear();
         applyMove(x, z, turn);
     }
@@ -776,7 +827,7 @@ public class App extends Application {
         Sphere sphere = createStone(x, z, player);
         stones.getChildren().add(sphere);
         stoneNodes.add(sphere);
-        history.add(new Move(x, y, z, player));
+        history.add(new Move(x, y, z, player, board.isPieSwapped()));
         if (history.size() == 1 && START_CLOCK_ON_FIRST_MOVE) clock.play();
 
         win = board.findWin(player);
@@ -784,7 +835,7 @@ public class App extends Application {
             over = true;
             clock.pause();
         } else {
-            turn = 3 - player;
+            turn = board.getCurrentTurn();
         }
 
         final Board.Win placedWin = win;
@@ -853,7 +904,7 @@ public class App extends Application {
         win = null;
         over = false;
         halos.getChildren().clear();
-        turn = m.player();
+        turn = board.getCurrentTurn();
         if (history.isEmpty()) {
             if (START_CLOCK_ON_FIRST_MOVE) {
                 clock.stop();
@@ -867,10 +918,13 @@ public class App extends Application {
         updateGhost();
     }
 
-    /** Replays the last undone move. */
+    /** Replays the last undone move (automatically restoring the Pie Rule choice if redoing move 2). */
     void redo() {
         if (animating > 0 || redoStack.isEmpty()) return;
         Move m = redoStack.pop();
+        if (board.isPieChoicePending()) {
+            board.decidePie(m.pieSwappedAtMove());
+        }
         applyMove(m.x(), m.z(), m.player());
     }
 
@@ -904,6 +958,12 @@ public class App extends Application {
         movesLabel.setText(String.valueOf(history.size()));
         if (undoButton != null) undoButton.setDisable(history.isEmpty() || animating > 0);
         if (redoButton != null) redoButton.setDisable(redoStack.isEmpty() || animating > 0);
+
+        if (pieBanner != null) {
+            boolean showPie = !over && board.isPieChoicePending();
+            pieBanner.setVisible(showPie);
+            pieBanner.setManaged(showPie);
+        }
         updateInfo();
     }
 
@@ -911,22 +971,39 @@ public class App extends Application {
         timeLabel.setText(String.format(Locale.ROOT, "%02d:%02d", seconds / 60, seconds % 60));
     }
 
-    /** Text inside the turn pill: win message, or where the stone under the mouse would land. */
+    /** Returns which human player currently owns the given stone color. */
+    int ownerOfStone(int stoneColor) {
+        if (board.isPieSwapped()) {
+            return stoneColor == 1 ? 2 : 1;
+        }
+        return stoneColor == 1 ? 1 : 2;
+    }
+
+    /** Text inside the turn pill: current owner/color, Pie Rule status, or hover position. */
     void updateInfo() {
         String text = "";
         if (over && win != null) {
             int[] s = win.stones().get(0);
-            text = Strings.winner(board.get(s[0], s[1], s[2]), win.stones().size());
-        } else if (hx >= 0) {
-            int y = board.dropY(hx, hz);
-            text = y >= 0 ? Strings.hover(hx, hz, y) : Strings.FULL;
+            text = Strings.winner(board.get(s[0], s[1], s[2]), win.stones().size(), board.isPieSwapped());
+        } else if (board.isPieChoicePending()) {
+            text = Strings.PIE_WAITING;
+        } else {
+            int owner = ownerOfStone(turn);
+            String side = turn == 1 ? "흑" : "백";
+            String turnDescription = owner + "P 차례 (" + side + "돌)";
+            if (hx >= 0) {
+                int y = board.dropY(hx, hz);
+                text = turnDescription + " · " + (y >= 0 ? Strings.hover(hx, hz, y) : Strings.FULL);
+            } else {
+                text = turnDescription;
+            }
         }
         infoLabel.setText(text);
     }
 
     /** Translucent preview stone at the spot where the next stone would land. */
     void updateGhost() {
-        int y = (!over && hx >= 0) ? board.dropY(hx, hz) : -1;
+        int y = (!over && !board.isPieChoicePending() && hx >= 0) ? board.dropY(hx, hz) : -1;
         ghost.setVisible(y >= 0);
         if (y < 0) return;
         ghost.setMaterial(ghostMat[turn]);
