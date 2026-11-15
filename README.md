@@ -20,7 +20,7 @@ https://maven.apache.org/download.cgi#CurrentMaven 에서
 ### 실행
 
 ```bash
-git clone "[https://github.com/Jeon-ChanYoung/omok3d.git](https://github.com/yhy04307-cloud/Omokfinalver.2.git)"
+git clone "https://github.com/yhy04307-cloud/Omokfinalver.2.git"
 cd omok3d
 mvn javafx:run
 ```
